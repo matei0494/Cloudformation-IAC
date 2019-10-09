@@ -1,0 +1,160 @@
+Parameters:
+   
+    VpcCIDR:
+        Description: Enter the ip range for the VPC
+        Type: String
+        Default: 10.0.0.0/16
+
+
+    EnvironmentName:
+        Description: A description bla bla
+        Type: String
+    
+    
+
+Resources:
+
+    VPC:
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: !Ref VpcCIDR
+            EnableDnsHostnames: true
+            Tags:
+                - Key: Name
+                  Value: !Ref EnvironmentName
+
+    LBSecGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            GroupDescription: Allow http traffic to the load balancer
+            VpcId: !Ref VPC
+            SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+            SecurityGroupEgress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+      
+    WebServerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+          GroupDescription: Allow http and ssh to our server
+          VpcId: !Ref VPC
+          SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 8080
+            ToPort: 8080
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0  
+          SecurityGroupEgress:
+          - IpProtocol: tcp
+            FromPort: 0
+            ToPort: 65535
+            CidrIp: 0.0.0.0/0   
+
+    WebAppLaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+        UserData:
+          Fn::Base64: !Sub |
+              #!/bin/bash
+              # Install docker
+              apt-get update
+              apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+              apt-get install -y docker-ce
+              usermod -aG docker ubuntu
+              docker run -p 8080:8080 tomcat:8.0
+        ImageId: ami-06d51e91cea0dac8d
+        KeyName: matei
+        SecurityGroups:
+        - Ref: WebServerSecGroup
+        InstanceType: t2.micro
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+    
+    WebAppGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        VPCZoneIdentifier:
+        - Fn::ImportValue:
+            !Sub "${EnvironmentName}-PRIV-NETS"
+        LaunchConfigurationName:
+          Ref: WebAppLaunchConfig
+        MinSize: '1'
+        MaxSize: '2'
+        TargetGroupARNs:
+        - Ref: WebAppTargetGroup
+
+    WebAppLB:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Subnets: 
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+      - Ref: LBSecGroup
+
+    Listener:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      Properties:
+        DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: WebAppTargetGroup
+        LoadBalancerArn:
+          Ref: WebAppLB
+        Port: '80'
+        Protocol: HTTP
+      
+    ALBListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forwards
+          TargetGroupArn: !Ref 'WebAppTargetGroup'
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+    
+    WebAppTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 10
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 8
+        HealthyThresholdCount: 2
+        Port: 8080
+        Protocol: HTTP
+        UnhealthyThresholdCount: 5
+        VpcId:
+          Fn::ImportValue:
+            Fn::Sub: "${EnvironmentName}-VPCID"
+
+
+
+
+      
+
+Outputs:
+    
+    VPC: 
+        Description: A reference to the created VPC
+        Value: !Ref VPC
+        Export:
+          Name: !Sub ${EnvironmentName}-VPCID
+
+          
